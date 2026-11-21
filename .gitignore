@@ -1,0 +1,6 @@
+# Kernel-Quellen und Build-Artefakte gehören nicht ins Repo
+linux-*/
+*.tar.xz
+*.tar.sign
+*.rpm
+*.log
