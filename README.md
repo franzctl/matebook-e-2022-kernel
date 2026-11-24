@@ -62,12 +62,26 @@ make -j"$(nproc)" binrpm-pkg
 
 Das Paket liegt danach unter `~/rpmbuild/RPMS/x86_64/`.
 
+## Automatisch bauen lassen
+
+Das RPM vom ersten Bau ging bei der Neuinstallation meines Laptops verloren. Statt es von Hand neu zu bauen, erledigt das jetzt GitHub Actions, genau nach den Schritten oben ([Workflow](.github/workflows/kernel.yml)):
+
+- Quellcode von kernel.org laden und die Signatur prüfen. Die Fingerabdrücke von Greg Kroah-Hartman und Linus Torvalds stehen fest im Workflow.
+- Die Konfiguration aus [`config/config-6.1.4`](config/config-6.1.4) übernehmen, die Änderungen von oben anwenden und prüfen, ob sie wirklich gelten
+- In derselben Umgebung bauen wie beim ersten Mal: Debian 13 mit GCC 14
+- Prüfen, dass im fertigen RPM keine xz-komprimierten Module stecken und der Grafiktreiber dabei ist
+
+Eine Abweichung vom Bau von Hand: Die Debug-Informationen sind aus, sonst reicht der Speicherplatz auf GitHub nicht. Für den Betrieb spielen sie keine Rolle.
+
+Bei einem Tag wie `v6.1.4-matebook.1` entsteht ein Release mit den RPMs, der verwendeten Konfiguration, dem Quellcode samt Signatur und Prüfsummen. Es bleibt als Vorabversion markiert, bis es auf dem Tablet getestet ist.
+
 ## Installieren
 
 Auf dem Tablet:
 
-1. Fedora im Boot-Menü über **„Basic Graphics Mode“** installieren. Der Modus setzt `nomodeset`, umgeht den i915-Treiber und liefert ein einfaches Bild, das für den Installer reicht.
-2. Kernel installieren, als Standard setzen und `nomodeset` für ihn entfernen, falls die Installation es übernommen hat:
+1. **Secure Boot im BIOS ausschalten.** Der Kernel ist nicht von Fedora signiert und startet sonst nicht.
+2. Fedora im Boot-Menü über **„Basic Graphics Mode“** installieren. Der Modus setzt `nomodeset`, umgeht den i915-Treiber und liefert ein einfaches Bild, das für den Installer reicht.
+3. Das RPM aus den [Releases](../../releases) herunterladen, mit `sha256sum -c SHA256SUMS.txt --ignore-missing` prüfen, installieren, als Standard setzen und `nomodeset` für ihn entfernen, falls die Installation es übernommen hat:
 
    ```bash
    sudo dnf install ./kernel-6.1.4-*.rpm
@@ -75,13 +89,13 @@ Auf dem Tablet:
    sudo grubby --update-kernel=/boot/vmlinuz-6.1.4 --remove-args="nomodeset"
    ```
 
-3. Kernel-Updates sperren, damit kein neuer Kernel den Fix wieder verdrängt:
+4. Kernel-Updates sperren, damit kein neuer Kernel den Fix wieder verdrängt:
 
    ```bash
    echo "excludepkgs=kernel*" | sudo tee -a /etc/dnf/dnf.conf
    ```
 
-4. Neu starten und die Lagesensoren prüfen. Die automatische Bilddrehung läuft über `iio-sensor-proxy`:
+5. Neu starten und die Lagesensoren prüfen. Die automatische Bilddrehung läuft über `iio-sensor-proxy`:
 
    ```bash
    monitor-sensor
@@ -103,4 +117,4 @@ Kernel 6.1.4 stammt vom Januar 2023. Als fester Stand bekommt er keine Sicherhei
 
 ## Lizenz
 
-Dokumentation unter MIT-Lizenz, siehe [LICENSE](LICENSE). Der Linux-Kernel selbst steht unter GPL-2.0 und ist nicht Teil dieses Repos.
+Dokumentation unter MIT-Lizenz, siehe [LICENSE](LICENSE). Der Linux-Kernel steht unter GPL-2.0. Sein Quellcode liegt nicht im Repo, gehört aber zu jedem Release dazu, als Originalarchiv von kernel.org mit Signatur. Die Konfigurationsdatei unter `config/` stammt aus dem Kernel-Bau.

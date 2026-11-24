@@ -1,0 +1,141 @@
+# Baut den Kernel 6.1.4 für das MateBook E 2022 genau nach der Anleitung in der README.
+#
+# Von Hand starten (Actions -> Kernel bauen -> Run workflow): baut und testet, die RPMs
+# liegen danach sieben Tage als Artefakt am Lauf.
+# Tag wie v6.1.4-matebook.1 pushen: baut und legt zusätzlich ein Release an, mit RPMs,
+# verwendeter Konfiguration, dem Quellcode von kernel.org (GPL) und Prüfsummen.
+#
+# Die Actions sind auf Commit-Hashes festgelegt, Dependabot hält sie aktuell.
+name: Kernel bauen
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v6.1.4-*"]
+
+permissions:
+  contents: read
+
+env:
+  KERNEL: "6.1.4"
+
+jobs:
+  bauen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    # Dieselbe Umgebung wie beim ersten Bau: Debian 13 mit GCC 14
+    container: debian:trixie
+    steps:
+      - name: Werkzeuge installieren
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev openssl libelf-dev cpio kmod rpm rsync \
+            wget xz-utils gnupg dirmngr ca-certificates python3 git
+
+      - name: Code holen
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Quellcode laden und Signatur prüfen
+        run: |
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL}.tar.xz"
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL}.tar.sign"
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --auto-key-locate clear,wkd --locate-keys torvalds@kernel.org gregkh@kernel.org
+          xz -cd "linux-${KERNEL}.tar.xz" | gpg --batch --status-fd 1 --verify "linux-${KERNEL}.tar.sign" - > pruefung.txt
+          # Nur eine gültige Signatur von Greg Kroah-Hartman oder Linus Torvalds zählt.
+          # Die Fingerabdrücke stehen fest im Workflow, damit kein untergeschobener Schlüssel durchgeht.
+          grep -E '^\[GNUPG:\] VALIDSIG .* (647F28654894E3BD457199BE38DBBDC86092693E|ABAF11C65A2970B130ABE3C479BE3E4300411886)$' pruefung.txt
+
+      - name: Konfiguration vorbereiten
+        run: |
+          tar xf "linux-${KERNEL}.tar.xz"
+          cp config/config-6.1.4 "linux-${KERNEL}/.config"
+          cd "linux-${KERNEL}"
+          make olddefconfig
+          # Wie in der README: BTF aus, keine fremden Schlüssel, Module unkomprimiert
+          scripts/config --disable DEBUG_INFO_BTF
+          scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
+          scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
+          scripts/config --disable MODULE_COMPRESS_XZ
+          scripts/config --enable MODULE_COMPRESS_NONE
+          # Abweichung vom Bau von Hand: ohne Debug-Informationen, sonst reicht der Platz auf GitHub nicht
+          scripts/config --disable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          scripts/config --enable DEBUG_INFO_NONE
+          make olddefconfig
+          # Prüfen, dass die Änderungen wirklich gelten
+          grep -qx 'CONFIG_MODULE_COMPRESS_NONE=y' .config
+          # (ein vorangestelltes "!" würde bei set -e nicht abbrechen, deshalb mit if)
+          if grep -qx 'CONFIG_DEBUG_INFO_BTF=y' .config; then echo "BTF ist noch an"; exit 1; fi
+          if grep -qx 'CONFIG_DEBUG_INFO=y' .config; then echo "Debug-Infos sind noch an"; exit 1; fi
+
+      - name: Bauen und als RPM paketieren
+        working-directory: linux-${{ env.KERNEL }}
+        run: make -j"$(nproc)" binrpm-pkg
+
+      - name: Ergebnis prüfen und einsammeln
+        run: |
+          mkdir -p ausgabe
+          find / -path '*/rpmbuild/RPMS/*' -name "kernel*${KERNEL}*.rpm" -exec cp {} ausgabe/ \; 2>/dev/null || true
+          ls -la ausgabe
+          kernel_rpm="$(ls ausgabe/kernel-${KERNEL}*.rpm | grep -v -E 'headers|devel' | head -n 1)"
+          # Genau der Fehler von damals darf nicht wiederkommen: keine xz-komprimierten Module
+          test "$(rpm -qlp "$kernel_rpm" | grep -c '\.ko\.xz$')" -eq 0
+          rpm -qlp "$kernel_rpm" | grep -q '/i915\.ko$'
+          cp "linux-${KERNEL}/.config" "ausgabe/config-${KERNEL}-matebook"
+          cp "linux-${KERNEL}.tar.xz" "linux-${KERNEL}.tar.sign" ausgabe/
+
+      - name: Signierschlüssel der Module löschen
+        if: always()
+        run: rm -f "linux-${KERNEL}/certs/signing_key.pem"
+
+      - name: Ergebnis aufbewahren
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kernel-${{ env.KERNEL }}
+          path: ausgabe/*
+          retention-days: 7
+          if-no-files-found: error
+
+  veroeffentlichen:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bauen
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Ergebnis holen
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kernel-${{ env.KERNEL }}
+          path: fertig
+
+      - name: Prüfsummen erzeugen
+        working-directory: fertig
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Release anlegen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > hinweise.md <<'TEXT'
+          Kernel 6.1.4 für das Huawei MateBook E 2022, automatisch gebaut nach der Anleitung in der README.
+
+          **Noch nicht auf dem Gerät getestet.** Dieses Release bleibt als Vorabversion markiert, bis es auf dem Tablet geprüft ist.
+
+          - `kernel-6.1.4-*.rpm`: Kernel und Module, Module unkomprimiert
+          - `config-6.1.4-matebook`: die verwendete Konfiguration
+          - `linux-6.1.4.tar.xz` und `.tar.sign`: der Quellcode von kernel.org mit Signatur (GPL-2.0)
+          - `SHA256SUMS.txt`: Prüfsummen
+
+          Secure Boot muss ausgeschaltet sein, der Kernel ist nicht von Fedora signiert.
+          TEXT
+          gh release create "$GITHUB_REF_NAME" fertig/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Kernel 6.1.4 für das MateBook E 2022 (${GITHUB_REF_NAME})" \
+            --notes-file hinweise.md \
+            --prerelease
